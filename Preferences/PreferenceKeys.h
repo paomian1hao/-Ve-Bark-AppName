@@ -1,0 +1,42 @@
+//
+//  PreferenceKeys.h
+//  Vē
+//
+//  Created by Alexandra Aurora Göttlicher
+//
+
+static NSString* const kPreferencesIdentifier = @"codes.wingchan.ve-enhanced.preferences";
+
+static NSString* const kPreferenceKeyEnabled = @"Enabled";
+static NSString* const kPreferenceKeyLogLimit = @"LogLimit";
+static NSString* const kPreferenceKeySaveLocalAttachments = @"SaveLocalAttachments";
+static NSString* const kPreferenceKeySaveRemoteAttachments = @"SaveRemoteAttachments";
+static NSString* const kPreferenceKeyLogWithoutContent = @"LogWithoutContent";
+static NSString* const kPreferenceKeyBlockedSenders = @"BlockedSenders";
+static NSString* const kPreferenceKeyAutomaticallyDeleteLogs = @"AutomaticallyDeleteLogs";
+static NSString* const kPreferenceKeyUseAmericanDateFormat = @"UseAmericanDateFormat";
+static NSString* const kPreferenceKeyBarkForwardingEnabled = @"BarkForwardingEnabled";
+static NSString* const kPreferenceKeyBarkAPIKey = @"BarkAPIKey";
+static NSString* const kPreferenceKeyBarkEncryptionKey = @"BarkEncryptionKey";
+static NSString* const kPreferenceKeyBarkDomain = @"BarkDomain";
+static NSString* const kPreferenceKeySorting = @"Sorting";
+
+static NSString* const kPreferenceKeySortingApplication = @"Application";
+static NSString* const kPreferenceKeySortingDate = @"Date";
+static NSString* const kPreferenceKeySortingSearch = @"Search";
+
+static BOOL const kPreferenceKeyEnabledDefaultValue = YES;
+static NSUInteger const kPreferenceKeyLogLimitDefaultValue = 2000;
+static BOOL const kPreferenceKeySaveLocalAttachmentsDefaultValue = YES;
+static BOOL const kPreferenceKeySaveRemoteAttachmentsDefaultValue = YES;
+static BOOL const kPreferenceKeyLogWithoutContentDefaultValue = YES;
+static inline NSArray* kPreferenceKeyBlockedSendersDefaultValue(void) {
+    return @[];
+}
+static BOOL const kPreferenceKeyAutomaticallyDeleteLogsDefaultValue = YES;
+static BOOL const kPreferenceKeyUseAmericanDateFormatDefaultValue = NO;
+static BOOL const kPreferenceKeyBarkForwardingEnabledDefaultValue = NO;
+static NSString* const kPreferenceKeyBarkAPIKeyDefaultValue = @"";
+static NSString* const kPreferenceKeyBarkEncryptionKeyDefaultValue = @"";
+static NSString* const kPreferenceKeyBarkDomainDefaultValue = @"https://api.day.app";
+static NSString* const kPreferenceKeySortingDefaultValue = kPreferenceKeySortingDate;

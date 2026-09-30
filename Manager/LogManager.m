@@ -1,0 +1,344 @@
+//
+//  LogManager.m
+//  Vē
+//
+//  Created by Alexandra Aurora Göttlicher
+//
+
+#import "LogManager.h"
+#import "Log.h"
+#import "../Utils/ImageUtil.h"
+#import "../Utils/JailbreakPath.h"
+#import "../Utils/StringUtil.h"
+#import "../Utils/DateUtil.h"
+#import "../Preferences/NotificationKeys.h"
+#import "../Preferences/PreferenceKeys.h"
+#import "../PrivateHeaders.h"
+
+@implementation LogManager
+/**
+ * Returns the logs file path.
+ */
++ (NSString *)logsPath {
+    return VEJailbreakRootPath(@"/var/mobile/Library/codes.wingchan.ve-enhanced/logs.json");
+}
+
+/**
+ * Returns the logs attachment directory path.
+ */
++ (NSString *)logsAttachmentPath {
+    return VEJailbreakRootPath(@"/var/mobile/Library/codes.wingchan.ve-enhanced/attachments/");
+}
+
+/**
+ * Creates the shared instance.
+ */
++ (instancetype)sharedInstance {
+    static LogManager* sharedInstance;
+    static dispatch_once_t onceToken;
+
+    dispatch_once(&onceToken, ^{
+        sharedInstance = [LogManager alloc];
+        sharedInstance->_fileManager = [NSFileManager defaultManager];
+    });
+
+    return sharedInstance;
+}
+
+/**
+ * Creates the manager using the shared instance.
+ */
+- (instancetype)init {
+    return [LogManager sharedInstance];
+}
+
+- (void)addLogForBulletin:(BBBulletin *)bulletin {
+    NSMutableDictionary* json = [self getJson];
+    NSUInteger lastIdentifier = [self getLastIdentifierFromJson:json];
+    NSMutableArray* logs = [self getLogsFromJson:json];
+
+    NSUInteger identifier = lastIdentifier + 1;
+    Log* log = [[Log alloc] initWithBulletin:bulletin identifier:identifier];
+
+    // Unseen notifications will be sent again after a respring.
+    // We check by date if the notification has been logged already.
+    if ([self isLogAlreadyLogged:log inLogs:logs]) {
+        return;
+    }
+
+    NSMutableDictionary* logDict = [@{
+        kLogKeyIdentifier: @(identifier),
+        kLogKeyBundleIdentifier: [log bundleIdentifier],
+        kLogKeyTitle: [log title],
+        kLogKeyContent: [log content],
+        kLogKeyDate: [DateUtil getStringFromDate:[log date] withFormat:kLogInternalDateFormat]
+    } mutableCopy];
+    
+    // Add new properties if they exist
+    if ([log subtitle] && ![[log subtitle] isEqualToString:@""]) {
+        logDict[kLogKeySubtitle] = [log subtitle];
+    }
+    
+    if ([log publicationDate]) {
+        logDict[kLogKeyPublicationDate] = [DateUtil getStringFromDate:[log publicationDate] withFormat:kLogInternalDateFormat];
+    }
+    
+    if ([log expirationDate]) {
+        logDict[kLogKeyExpirationDate] = [DateUtil getStringFromDate:[log expirationDate] withFormat:kLogInternalDateFormat];
+    }
+    
+    // Identifiers
+    if ([log bulletinID]) logDict[kLogKeyBulletinID] = [log bulletinID];
+    if ([log bulletinVersionID]) logDict[kLogKeyBulletinVersionID] = [log bulletinVersionID];
+    if ([log threadID]) logDict[kLogKeyThreadID] = [log threadID];
+    if ([log categoryID]) logDict[kLogKeyCategoryID] = [log categoryID];
+    
+    // Behavior properties - always save these as they have default boolean values
+    logDict[kLogKeyClearable] = @([log clearable]);
+    logDict[kLogKeyIgnoresQuietMode] = @([log ignoresQuietMode]);
+    logDict[kLogKeyTurnsOnDisplay] = @([log turnsOnDisplay]);
+    logDict[kLogKeyPlaySound] = @([log playSound]);
+    logDict[kLogKeyHasPrivateContent] = @([log hasPrivateContent]);
+    
+    // Summary and content
+    if ([log summaryArgument]) logDict[kLogKeySummaryArgument] = [log summaryArgument];
+    if ([log summaryArgumentCount] > 0) logDict[kLogKeySummaryArgumentCount] = @([log summaryArgumentCount]);
+    
+    // Time zone
+    if ([log timeZone]) logDict[kLogKeyTimeZone] = [[log timeZone] name];
+    
+    // Raw bulletin data for debugging
+    if ([log rawBulletinData]) logDict[kLogKeyRawBulletinData] = [log rawBulletinData];
+    
+    [logs insertObject:logDict atIndex:0];
+
+    if ([self saveLocalAttachments]) {
+        [self saveLocalAttachmentsForLog:log fromBulletin:bulletin];
+    }
+
+    if ([self saveRemoteAttachments]) {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            [self saveRemoteAttachmentsForLog:log];
+        });
+    }
+
+    // Remove the oldest logs if the logs count exceeds the set limit.
+    while ([logs count] > [self logLimit]) {
+        [logs removeLastObject];
+    }
+
+    json[kLogsKeyLogs] = logs;
+    json[kLogsKeyLastIdentifier] = @(identifier);
+
+    [self setJsonFromDictionary:json];
+
+    // if ([self automaticallyDeleteLogs]) {
+    //     [self removeOverdueLogsFromLogs:logs];
+    // }
+}
+
+- (void)removeLog:(Log *)log {
+    NSMutableDictionary* json = [self getJson];
+    NSMutableArray* logs = [self getLogsFromJson:json];
+
+    for (NSDictionary* dictionary in logs) {
+        Log* _log = [Log logFromDictionary:dictionary];
+        if ([log identifier] == [_log identifier]) {
+            [logs removeObject:dictionary];
+            break;
+        }
+    }
+
+    json[kLogsKeyLogs] = logs;
+
+    [self setJsonFromDictionary:json];
+}
+
+- (void)removeOverdueLogsFromLogs:(NSMutableArray *)logs {
+    NSMutableDictionary* json = [self getJson];
+    NSDate* now = [NSDate date];
+    NSDate* lastHouseholdDate = [DateUtil getDateFromString:[self getLastHousekeepingDateFromJson:json] withFormat:kLogInternalDateFormat];
+
+    if ([DateUtil isDate:lastHouseholdDate inDate:now]) {
+        return;
+    }
+    json[kLogsKeyLastHousekeepingDate] = [DateUtil getStringFromDate:now withFormat:kLogInternalDateFormat];
+    [self setJsonFromDictionary:json];
+
+    for (Log* log in logs) {
+        if ([DateUtil isDate:[log date] olderThanDays:7]) {
+            [self removeLog:log];
+        }
+    }
+}
+
+- (void)saveLocalAttachmentsForLog:(Log *)log fromBulletin:(BBBulletin *)bulletin {
+    NSURL* attachmentsURL = [[[bulletin primaryAttachment] URL] URLByDeletingLastPathComponent];
+    NSString* attachmentsDirectoryPath = [[attachmentsURL absoluteString] stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+    NSArray* attachmentsDirectoryContents = [_fileManager contentsOfDirectoryAtPath:attachmentsDirectoryPath error:nil];
+
+    for (NSUInteger i = 0; i < [attachmentsDirectoryContents count]; i++) {
+        NSString* fileName = attachmentsDirectoryContents[i];
+        NSString* filePath = [NSString stringWithFormat:@"%@%@", attachmentsDirectoryPath, fileName];
+        UIImage* image = [UIImage imageWithContentsOfFile:filePath];
+
+        if (image) {
+            [self saveAttachmentImage:image forLog:log];
+        }
+    }
+}
+
+- (void)saveRemoteAttachmentsForLog:(Log *)log {
+    NSDataDetector* dataDetector = [NSDataDetector dataDetectorWithTypes:NSTextCheckingTypeLink error:nil];
+    NSMutableArray* matches = [[NSMutableArray alloc] init];
+
+    for (NSString* string in @[[log title], [log content]]) {
+        NSArray* newMatches = [dataDetector matchesInString:string options:0 range:NSMakeRange(0, [string length])];
+        [matches addObjectsFromArray:newMatches];
+    }
+
+    for (NSTextCheckingResult* match in matches) {
+        UIImage* image = [UIImage imageWithData:[NSData dataWithContentsOfURL:[match URL]]];
+        if (image) {
+            [self saveAttachmentImage:image forLog:log];
+        }
+    }
+}
+
+- (void)saveAttachmentImage:(UIImage *)image forLog:(Log *)log {
+    NSString* directoryPath = [NSString stringWithFormat:@"%@%lu/", [LogManager logsAttachmentPath], [log identifier]];
+    if (![_fileManager fileExistsAtPath:directoryPath]) {
+        [_fileManager createDirectoryAtPath:directoryPath withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    if ([ImageUtil imageHasAlpha:image]) {
+        NSData* attachmentData = UIImagePNGRepresentation(image);
+        [attachmentData writeToFile:[NSString stringWithFormat:@"%@%@.png", directoryPath, [StringUtil getRandomStringWithLength:32]] atomically:YES];
+    } else {
+        NSData* attachmentData = UIImageJPEGRepresentation(image, 1);
+        [attachmentData writeToFile:[NSString stringWithFormat:@"%@%@.jpg", directoryPath, [StringUtil getRandomStringWithLength:32]] atomically:YES];
+    }
+}
+
+- (NSArray *)getAttachmentsForLog:(Log *)log {
+    NSString* directoryPath = [NSString stringWithFormat:@"%@%lu/", [LogManager logsAttachmentPath], [log identifier]];
+    NSArray* directoryContents = [_fileManager contentsOfDirectoryAtPath:directoryPath error:nil];
+
+    NSMutableArray* attachments = [[NSMutableArray alloc] init];
+    for (NSUInteger i = 0; i < [directoryContents count]; i++) {
+        NSString* fileName = directoryContents[i];
+        NSString* filePath = [NSString stringWithFormat:@"%@%@", directoryPath, fileName];
+        [attachments addObject:[UIImage imageWithContentsOfFile:filePath]];
+    }
+
+    return attachments;
+}
+
+- (BOOL)isLogAlreadyLogged:(Log *)log inLogs:(NSMutableArray *)logs {
+    NSString* logDateString = [DateUtil getStringFromDate:[log date] withFormat:kLogInternalDateFormat];
+
+    for (NSDictionary* existingLogDictionary in logs) {
+        Log* existingLog = [Log logFromDictionary:existingLogDictionary];
+        NSString* existingLogDateString = [DateUtil getStringFromDate:[existingLog date] withFormat:kLogInternalDateFormat];
+        if ([existingLogDateString isEqualToString:logDateString]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+- (BOOL)isBulletinIDAlreadyExists:(NSString *)bulletinID {
+    if (!bulletinID || [bulletinID isEqualToString:@""]) {
+        return NO;
+    }
+    
+    NSMutableDictionary* json = [self getJson];
+    NSMutableArray* logs = [self getLogsFromJson:json];
+    
+    for (NSDictionary* existingLogDictionary in logs) {
+        NSString* existingBulletinID = existingLogDictionary[kLogKeyBulletinID];
+        if (existingBulletinID && [existingBulletinID isEqualToString:bulletinID]) {
+            return YES;
+        }
+    }
+    
+    return NO;
+}
+
+- (NSMutableArray *)getLogsFromJson:(NSMutableDictionary *)json {
+    return json[kLogsKeyLogs] ?: [[NSMutableArray alloc] init];
+}
+
+- (NSUInteger)getLastIdentifierFromJson:(NSMutableDictionary *)json {
+    return [json[kLogsKeyLastIdentifier] ?: @(0) unsignedIntegerValue];
+}
+
+- (NSString *)getLastHousekeepingDateFromJson:(NSMutableDictionary *)json {
+    NSString* dateString = json[kLogsKeyLastHousekeepingDate];
+
+    if (!dateString) {
+        dateString = [DateUtil getStringFromDate:[NSDate date] withFormat:kLogInternalDateFormat];
+        json[kLogsKeyLastHousekeepingDate] = dateString;
+        [self setJsonFromDictionary:json];
+    }
+
+    return dateString;
+}
+
+/**
+ * Returns a dictionary from the json containing the logs.
+ *
+ * @return The dictionary.
+ */
+- (NSMutableDictionary *)getJson {
+    [self ensureResourcesExist];
+
+    NSData* jsonData = [NSData dataWithContentsOfFile:[LogManager logsPath]];
+    NSMutableDictionary* json = [NSJSONSerialization JSONObjectWithData:jsonData options:NSJSONReadingMutableContainers error:nil];
+
+    return json;
+}
+
+/**
+ * Saves the dictionary contents to the json file.
+ *
+ * @param dictionary The dictionary from which to save the contents from.
+ */
+- (void)setJsonFromDictionary:(NSMutableDictionary *)dictionary {
+    NSData* jsonData = [NSJSONSerialization dataWithJSONObject:dictionary options:NSJSONWritingPrettyPrinted error:nil];
+    [jsonData writeToFile:[LogManager logsPath] atomically:YES];
+}
+
+/**
+ * Creates the json and path for the attachments.
+ */
+- (void)removeAllLogs {
+    // Remove all log files
+    if ([_fileManager fileExistsAtPath:[LogManager logsPath]]) {
+        [_fileManager removeItemAtPath:[LogManager logsPath] error:nil];
+    }
+    
+    // Remove all attachment directories
+    if ([_fileManager fileExistsAtPath:[LogManager logsAttachmentPath]]) {
+        [_fileManager removeItemAtPath:[LogManager logsAttachmentPath] error:nil];
+    }
+    
+    // Recreate empty structure
+    [self ensureResourcesExist];
+    
+    NSLog(@"[Ve] All logs and attachments have been cleared");
+}
+
+- (void)ensureResourcesExist {
+    BOOL isDirectory;
+    if (![_fileManager fileExistsAtPath:[LogManager logsAttachmentPath] isDirectory:&isDirectory]) {
+        [_fileManager createDirectoryAtPath:[LogManager logsAttachmentPath] withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    if (![_fileManager fileExistsAtPath:[LogManager logsPath]]) {
+        NSData* jsonData = [NSJSONSerialization dataWithJSONObject:[[NSMutableDictionary alloc] init] options:NSJSONWritingPrettyPrinted error:nil];
+        [jsonData writeToFile:[LogManager logsPath] options:NSDataWritingAtomic error:nil];
+    }
+}
+@end
